@@ -482,7 +482,19 @@ const readFileAsBase64 = (file) => {
                 </PathNavigator>
 
                 <FileExplorer>
-                  {contents.map(item => (
+                  {[...contents] // Create a shallow copy to sort
+                    .sort((a, b) => {
+                      // Prioritize directories
+                      if (a.type === 'dir' && b.type !== 'dir') {
+                        return -1; // a (dir) comes before b (file)
+                      }
+                      if (a.type !== 'dir' && b.type === 'dir') {
+                        return 1; // b (dir) comes before a (file)
+                      }
+                      // If both are dirs or both are files, sort by name (case-insensitive)
+                      return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+                    })
+                    .map(item => (
                     <FileItem 
                       key={item.sha} 
                       onClick={() => handleNavigate(item)}
