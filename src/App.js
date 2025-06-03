@@ -43,8 +43,8 @@ import {
 
 // GitHub OAuth App credentials would normally be stored securely
 // For demo purposes, we're using placeholder values
-const GITHUB_CLIENT_ID = 'Ov23liar9wjLDWrJz1Lx';
-const GITHUB_CLIENT_SECRET = '501fe2d9197171e5130909d0794f1eb08d57298f';
+const GITHUB_CLIENT_ID = process.env.REACT_APP_GITHUB_CLIENT_ID;
+const GITHUB_CLIENT_SECRET = process.env.REACT_APP_GITHUB_CLIENT_SECRET;
 
 
 
