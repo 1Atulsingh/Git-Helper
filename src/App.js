@@ -59,10 +59,11 @@ const App = () => {
   const [contents, setContents] = useState([]);
   const [branches, setBranches] = useState([]);
   const [currentBranch, setCurrentBranch] = useState('main');
-  const [commitMessage, setCommitMessage] = useState('');
+  const [commitMessage, setCommitMessage] = useState("");
   const [notification, setNotification] = useState(null);
   const [uploadFiles, setUploadFiles] = useState([]);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [newFolderName, setNewFolderName] = useState(""); // State for the new folder name
 
   // Initialize GitHub on component mount
   useEffect(() => {
@@ -104,13 +105,17 @@ const App = () => {
   const loadUserRepositories = async (octokitInstance) => {
     try {
       const { data: repos } = await octokitInstance.repos.listForAuthenticatedUser({
-        sort: 'updated',
+        sort: "updated", // Keep sorting by updated initially, or change to full_name if preferred
         per_page: 100
       });
-      setRepositories(repos);
+      // Sort repositories by name (case-insensitive)
+      const sortedRepos = [...repos].sort((a, b) => 
+        a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+      );
+      setRepositories(sortedRepos);
     } catch (error) {
-      console.error('Error loading repositories:', error);
-      showNotification('error', 'Failed to load repositories');
+      console.error("Error loading repositories:", error);
+      showNotification("error", "Failed to load repositories");
     }
   };
 
@@ -250,8 +255,12 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
 
   // Handle file upload and commit
   const handleUploadFiles = async () => {
+    if (!newFolderName.trim()) {
+      showNotification("error", "Please enter a name for the new folder");
+      return;
+    }
     if (!commitMessage.trim()) {
-      showNotification('error', 'Please enter a commit message');
+      showNotification("error", "Please enter a commit message");
       return;
     }
     
@@ -284,13 +293,17 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
           owner: selectedRepo.owner.login,
           repo: selectedRepo.name,
           content: content,
-          encoding: 'base64'
+          encoding: "base64"
         });
         
+        // Construct the path including the new folder name
+        const folderPath = currentPath === "/" ? newFolderName : `${currentPath}/${newFolderName}`;
+        const filePath = `${folderPath}/${file.name}`.replace(/^\/\//, ""); // Ensure no leading slash
+
         return {
-          path: currentPath === '/' ? file.name : `${currentPath}/${file.name}`,
-          mode: '100644', // Regular file
-          type: 'blob',
+          path: filePath,
+          mode: "100644", // Regular file
+          type: "blob",
           sha: blobData.sha
         };
       }));
@@ -340,12 +353,13 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
       // Close modal and clear state
       setShowUploadModal(false);
       setUploadFiles([]);
-      setCommitMessage('');
+      setCommitMessage("");
+      setNewFolderName(""); // Reset folder name state
       
-      showNotification('success', `Successfully uploaded ${uploadFiles.length} file(s)`);
+      showNotification("success", `Successfully uploaded ${uploadFiles.length} file(s) to folder ${newFolderName}`);
     } catch (error) {
-      console.error('Error uploading files:', error);
-      showNotification('error', 'Failed to upload files');
+      console.error("Error uploading files:", error);
+      showNotification("error", "Failed to upload files");
     }
   };
 
@@ -542,26 +556,33 @@ const readFileAsBase64 = (file) => {
               <CloseButton onClick={() => setShowUploadModal(false)}>×</CloseButton>
             </ModalHeader>
             <ModalBody>
-              <h4>Files to upload:</h4>
               <FileList>
                 {uploadFiles.map((file, index) => (
-                  <FileListItem key={index}>
-                    {file.name} ({(file.size / 1024).toFixed(2)} KB)
-                  </FileListItem>
+                  <FileListItem key={index}>{file.name}</FileListItem>
                 ))}
               </FileList>
               <CommitMessageInput>
-                <label>Commit message:</label>
-                <textarea
+                <label>New Folder Name (required):</label>
+                <input 
+                  type="text"
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  placeholder="Enter name for the new folder..."
+                  style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid #30363d", backgroundColor: "#161b22", color: "#c9d1d9", marginBottom: "16px" }}
+                />
+              </CommitMessageInput>
+              <CommitMessageInput>
+                <label>Commit Message:</label>
+                <textarea 
                   value={commitMessage}
                   onChange={(e) => setCommitMessage(e.target.value)}
-                  placeholder="Enter commit message..."
+                  placeholder="Enter your commit message here..."
                 />
               </CommitMessageInput>
             </ModalBody>
             <ModalFooter>
               <CancelButton onClick={() => setShowUploadModal(false)}>Cancel</CancelButton>
-              <UploadButton onClick={handleUploadFiles}>Commit Changes</UploadButton>
+              <UploadButton onClick={handleUploadFiles}>Upload & Commit</UploadButton>
             </ModalFooter>
           </ModalContent>
         </Modal>
