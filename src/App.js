@@ -283,54 +283,36 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
       });
       const baseTreeSha = commitData.tree.sha;
 
-      // --- Get existing files in the repository to check for duplicates --- 
-      showNotification("info", "Checking for existing files...");
-      let existingPaths = new Set();
-      try {
-        const { data: treeData } = await octokit.git.getTree({
-          owner: selectedRepo.owner.login,
-          repo: selectedRepo.name,
-          tree_sha: baseTreeSha,
-          recursive: true
-        });
-        if (treeData.tree) {
-          existingPaths = new Set(treeData.tree.map(item => item.path));
-        }
-      } catch (treeError) {
-        // If the tree is too large, recursive fetch might fail. Handle gracefully.
-        console.warn("Could not fetch full repository tree for duplicate check:", treeError);
-        showNotification("warning", "Could not fully check for duplicates; proceeding with upload.");
-        // Allow upload to proceed without duplicate check in this edge case
-      }
-
       // --- Process dropped files (including unpacking ZIPs) ---
       const fileBlobs = [];
-      const skippedFiles = [];
       const zip = new JSZip();
 
       for (const file of uploadFiles) {
-        const baseFolderPath = currentPath === "/" ? newFolderName : `${currentPath}/${newFolderName}`;
-        const cleanBaseFolderPath = baseFolderPath.replace(/^\/\//, ""); // Ensure no leading slash
+        // Determine base path: Use currentPath for ZIPs, newFolderName for others
+        let targetBasePath = "";
+        if (file.name.toLowerCase().endsWith(".zip")) {
+          targetBasePath = currentPath === "/" ? "" : currentPath.replace(/^\/\//, "");
+          showNotification("info", `Processing ZIP file ${file.name} for merge/update...`);
+        } else {
+          // For non-ZIP files, use the user-provided folder name
+          if (!newFolderName.trim()) {
+            showNotification("error", "Please enter a folder name for non-ZIP file uploads.");
+            // Skip this file or handle error appropriately
+            continue; 
+          }
+          targetBasePath = currentPath === "/" ? newFolderName : `${currentPath}/${newFolderName}`;
+          targetBasePath = targetBasePath.replace(/^\/\//, ""); // Ensure no leading slash
+        }
 
         if (file.name.toLowerCase().endsWith(".zip")) {
           try {
-            showNotification("info", `Unpacking ${file.name}...`);
             const zipData = await zip.loadAsync(file);
-            const zipFolderName = file.name.replace(/\.zip$/i, ""); // Folder name from zip file name
-            const fullZipFolderPath = `${cleanBaseFolderPath}/${zipFolderName}`.replace(/^\/\//, "");
-
-            // Process each file within the zip
             const zipEntries = Object.values(zipData.files);
             for (const entry of zipEntries) {
               if (!entry.dir) { // Skip directories within the zip
-                const filePath = `${fullZipFolderPath}/${entry.name}`.replace(/^\/\//, "");
-                
-                // --- Duplicate Check --- 
-                if (existingPaths.has(filePath)) {
-                  skippedFiles.push(entry.name); // Record skipped file
-                  continue; // Skip this file
-                }
-                // --- End Duplicate Check ---
+                // Construct path relative to the current repository path
+                const filePath = targetBasePath ? `${targetBasePath}/${entry.name}` : entry.name;
+                const cleanFilePath = filePath.replace(/^\/\//, "");
 
                 const entryContent = await entry.async("base64");
                 const { data: blobData } = await octokit.git.createBlob({
@@ -340,30 +322,22 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
                   encoding: "base64"
                 });
                 fileBlobs.push({
-                  path: filePath,
+                  path: cleanFilePath,
                   mode: "100644",
                   type: "blob",
                   sha: blobData.sha
                 });
               }
             }
-            showNotification("info", `Finished unpacking ${file.name}.`);
+            showNotification("info", `Finished processing ${file.name}.`);
           } catch (zipError) {
-            console.error(`Error unpacking zip file ${file.name}:`, zipError);
-            showNotification("error", `Failed to unpack ${file.name}. Skipping.`);
-            continue; // Skip this zip file if unpacking fails
+            console.error(`Error processing zip file ${file.name}:`, zipError);
+            showNotification("error", `Failed to process ${file.name}. Skipping.`);
+            continue; // Skip this zip file if processing fails
           }
         } else {
-          // Handle regular files
-          const filePath = `${cleanBaseFolderPath}/${file.name}`.replace(/^\/\//, "");
-          
-          // --- Duplicate Check --- 
-          if (existingPaths.has(filePath)) {
-            skippedFiles.push(file.name); // Record skipped file
-            continue; // Skip this file
-          }
-          // --- End Duplicate Check ---
-
+          // Handle regular files (uploading into the specified newFolderName)
+          const filePath = `${targetBasePath}/${file.name}`.replace(/^\/\//, "");
           const content = await readFileAsBase64(file);
           const { data: blobData } = await octokit.git.createBlob({
             owner: selectedRepo.owner.login,
