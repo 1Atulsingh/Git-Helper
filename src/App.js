@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Octokit } from '@octokit/rest';
+import JSZip from 'jszip'; // Import JSZip
 import {
   AppContainer,
   Header,
@@ -41,8 +42,7 @@ import {
   UploadButton
 } from './styles/StyledComponents';
 
-// GitHub OAuth App credentials would normally be stored securely
-// For demo purposes, we're using placeholder values
+// GitHub OAuth App credentials read from environment variables
 const GITHUB_CLIENT_ID = process.env.REACT_APP_GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.REACT_APP_GITHUB_CLIENT_SECRET;
 
@@ -263,7 +263,9 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
       showNotification("error", "Please enter a commit message");
       return;
     }
-    
+
+    showNotification("info", "Preparing upload... This may take a moment for large files or ZIP archives.");
+
     try {
       // Get the latest commit SHA for the branch
       const { data: refData } = await octokit.git.getRef({
@@ -271,43 +273,124 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
         repo: selectedRepo.name,
         ref: `heads/${currentBranch}`
       });
-      
       const latestCommitSha = refData.object.sha;
-      
+
       // Get the base tree
       const { data: commitData } = await octokit.git.getCommit({
         owner: selectedRepo.owner.login,
         repo: selectedRepo.name,
         commit_sha: latestCommitSha
       });
-      
       const baseTreeSha = commitData.tree.sha;
-      
-      // Create blobs for each file
-      const fileBlobs = await Promise.all(uploadFiles.map(async (file) => {
-        // Read file content
-        const content = await readFileAsBase64(file);
-        
-        // Create blob
-        const { data: blobData } = await octokit.git.createBlob({
+
+      // --- Get existing files in the repository to check for duplicates --- 
+      showNotification("info", "Checking for existing files...");
+      let existingPaths = new Set();
+      try {
+        const { data: treeData } = await octokit.git.getTree({
           owner: selectedRepo.owner.login,
           repo: selectedRepo.name,
-          content: content,
-          encoding: "base64"
+          tree_sha: baseTreeSha,
+          recursive: true
         });
-        
-        // Construct the path including the new folder name
-        const folderPath = currentPath === "/" ? newFolderName : `${currentPath}/${newFolderName}`;
-        const filePath = `${folderPath}/${file.name}`.replace(/^\/\//, ""); // Ensure no leading slash
+        if (treeData.tree) {
+          existingPaths = new Set(treeData.tree.map(item => item.path));
+        }
+      } catch (treeError) {
+        // If the tree is too large, recursive fetch might fail. Handle gracefully.
+        console.warn("Could not fetch full repository tree for duplicate check:", treeError);
+        showNotification("warning", "Could not fully check for duplicates; proceeding with upload.");
+        // Allow upload to proceed without duplicate check in this edge case
+      }
 
-        return {
-          path: filePath,
-          mode: "100644", // Regular file
-          type: "blob",
-          sha: blobData.sha
-        };
-      }));
-      
+      // --- Process dropped files (including unpacking ZIPs) ---
+      const fileBlobs = [];
+      const skippedFiles = [];
+      const zip = new JSZip();
+
+      for (const file of uploadFiles) {
+        const baseFolderPath = currentPath === "/" ? newFolderName : `${currentPath}/${newFolderName}`;
+        const cleanBaseFolderPath = baseFolderPath.replace(/^\/\//, ""); // Ensure no leading slash
+
+        if (file.name.toLowerCase().endsWith(".zip")) {
+          try {
+            showNotification("info", `Unpacking ${file.name}...`);
+            const zipData = await zip.loadAsync(file);
+            const zipFolderName = file.name.replace(/\.zip$/i, ""); // Folder name from zip file name
+            const fullZipFolderPath = `${cleanBaseFolderPath}/${zipFolderName}`.replace(/^\/\//, "");
+
+            // Process each file within the zip
+            const zipEntries = Object.values(zipData.files);
+            for (const entry of zipEntries) {
+              if (!entry.dir) { // Skip directories within the zip
+                const filePath = `${fullZipFolderPath}/${entry.name}`.replace(/^\/\//, "");
+                
+                // --- Duplicate Check --- 
+                if (existingPaths.has(filePath)) {
+                  skippedFiles.push(entry.name); // Record skipped file
+                  continue; // Skip this file
+                }
+                // --- End Duplicate Check ---
+
+                const entryContent = await entry.async("base64");
+                const { data: blobData } = await octokit.git.createBlob({
+                  owner: selectedRepo.owner.login,
+                  repo: selectedRepo.name,
+                  content: entryContent,
+                  encoding: "base64"
+                });
+                fileBlobs.push({
+                  path: filePath,
+                  mode: "100644",
+                  type: "blob",
+                  sha: blobData.sha
+                });
+              }
+            }
+            showNotification("info", `Finished unpacking ${file.name}.`);
+          } catch (zipError) {
+            console.error(`Error unpacking zip file ${file.name}:`, zipError);
+            showNotification("error", `Failed to unpack ${file.name}. Skipping.`);
+            continue; // Skip this zip file if unpacking fails
+          }
+        } else {
+          // Handle regular files
+          const filePath = `${cleanBaseFolderPath}/${file.name}`.replace(/^\/\//, "");
+          
+          // --- Duplicate Check --- 
+          if (existingPaths.has(filePath)) {
+            skippedFiles.push(file.name); // Record skipped file
+            continue; // Skip this file
+          }
+          // --- End Duplicate Check ---
+
+          const content = await readFileAsBase64(file);
+          const { data: blobData } = await octokit.git.createBlob({
+            owner: selectedRepo.owner.login,
+            repo: selectedRepo.name,
+            content: content,
+            encoding: "base64"
+          });
+          fileBlobs.push({
+            path: filePath,
+            mode: "100644",
+            type: "blob",
+            sha: blobData.sha
+          });
+        }
+      }
+
+      if (fileBlobs.length === 0) {
+        showNotification("warning", "No valid files processed for upload.");
+        setShowUploadModal(false);
+        setUploadFiles([]);
+        setCommitMessage("");
+        setNewFolderName("");
+        return;
+      }
+
+      showNotification("info", "Creating commit...");
+
       // Create tree
       const { data: treeData } = await octokit.git.createTree({
         owner: selectedRepo.owner.login,
@@ -315,7 +398,7 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
         base_tree: baseTreeSha,
         tree: fileBlobs
       });
-      
+
       // Create commit
       const { data: newCommitData } = await octokit.git.createCommit({
         owner: selectedRepo.owner.login,
@@ -324,42 +407,49 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
         tree: treeData.sha,
         parents: [latestCommitSha]
       });
-      
+
       // Update branch reference
       await octokit.git.updateRef({
         owner: selectedRepo.owner.login,
         repo: selectedRepo.name,
         ref: `heads/${currentBranch}`,
         sha: newCommitData.sha,
-        force: true
+        force: false // Set force to false initially, handle conflicts if necessary
       });
-      
-      // Refresh contents
-      await loadRepositoryContents(selectedRepo, currentPath, currentBranch);
 
-      // After successful upload and commit
-      // Refresh contents with a slight delay to ensure GitHub API has updated
-    setTimeout(async () => {
-    const success = await loadRepositoryContents(selectedRepo, currentPath, currentBranch);
-    if (!success) {
-    // Try one more time if the first attempt fails
-    setTimeout(() => {
-      loadRepositoryContents(selectedRepo, currentPath, currentBranch);
-    }, 1000);
-  }
-}, 500);
+      // Refresh contents after a delay
+      showNotification("info", "Upload successful! Refreshing content...");
+      setTimeout(async () => {
+        const success = await loadRepositoryContents(selectedRepo, currentPath, currentBranch);
+        if (!success) {
+          setTimeout(() => {
+            loadRepositoryContents(selectedRepo, currentPath, currentBranch);
+          }, 1500); // Increased delay for second attempt
+        }
+      }, 1000); // Increased initial delay
 
-      
       // Close modal and clear state
       setShowUploadModal(false);
       setUploadFiles([]);
       setCommitMessage("");
-      setNewFolderName(""); // Reset folder name state
-      
-      showNotification("success", `Successfully uploaded ${uploadFiles.length} file(s) to folder ${newFolderName}`);
+      setNewFolderName("");
+
+      // Notify about skipped files, if any
+      if (skippedFiles.length > 0) {
+        showNotification("warning", `Skipped ${skippedFiles.length} duplicate file(s): ${skippedFiles.join(", ")}`)
+      }
+
+      showNotification("success", `Successfully processed upload to folder ${newFolderName}`);
     } catch (error) {
       console.error("Error uploading files:", error);
-      showNotification("error", "Failed to upload files");
+      // Provide more specific error feedback if possible
+      if (error.status === 409) { // Conflict error
+          showNotification("error", "Upload failed: Conflict detected. Please refresh and try again.");
+      } else if (error.message.includes("path exists")) {
+          showNotification("error", "Upload failed: Some files already exist. Duplicate handling not fully implemented yet.");
+      } else {
+          showNotification("error", `Upload failed: ${error.message || 'Unknown error'}`);
+      }
     }
   };
 
