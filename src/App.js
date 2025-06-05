@@ -408,11 +408,6 @@ const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
       setCommitMessage("");
       setNewFolderName("");
 
-      // Notify about skipped files, if any
-      if (skippedFiles.length > 0) {
-        showNotification("warning", `Skipped ${skippedFiles.length} duplicate file(s): ${skippedFiles.join(", ")}`)
-      }
-
       showNotification("success", `Successfully processed upload to folder ${newFolderName}`);
     } catch (error) {
       console.error("Error uploading files:", error);
