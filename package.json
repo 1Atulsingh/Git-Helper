@@ -15,11 +15,13 @@
   "dependencies": {
     "@octokit/auth-oauth-app": "^9.0.1",
     "@octokit/rest": "^22.0.0",
+    "@zip.js/zip.js": "^2.7.62",
     "jszip": "^3.10.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-scripts": "^5.0.1",
-    "styled-components": "^6.1.18"
+    "styled-components": "^6.1.18",
+    "web-streams-polyfill": "^4.1.0"
   },
   "browserslist": {
     "production": [

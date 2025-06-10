@@ -1,498 +1,462 @@
-
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Octokit } from '@octokit/rest';
-import JSZip from 'jszip'; // Import JSZip
-import {
-  AppContainer,
-  Header,
-  Title,
-  UserInfo,
-  UserAvatar, // Added missing import
-  UserName,
-  LoginButton,
-  LogoutButton,
-  MainContent,
-  Sidebar,
-  SidebarHeader,
-  RepoList,
-  RepoItem,
-  Content,
-  RepositoryHeader,
-  RepoName,
-  BranchSelector,
-  PathNavigator,
-  PathItem,
-  PathSeparator,
-  FileExplorer,
-  FileItem,
-  FileIcon,
-  FileName,
-  DropZone,
-  DropZoneText,
-  WelcomeMessage,
-  Notification,
-  Modal,
-  ModalContent,
-  ModalHeader,
-  CloseButton,
-  ModalBody,
-  FileList,
-  FileListItem,
-  CommitMessageInput, // Assuming this is a styled div/label wrapper
-  ModalFooter,
-  CancelButton,
+import JSZip from 'jszip';
+import { 
+  AppContainer, Header, Title, UserInfo, UserAvatar, UserName,
+  LoginButton, LogoutButton, MainContent, Sidebar, SidebarHeader,
+  RepoList, RepoItem, Content, WelcomeMessage, RepositoryHeader,
+  RepoName, BranchSelector, PathNavigator, PathItem, PathSeparator,
+  FileExplorer, FileItem, FileIcon, FileName, DropZone, DropZoneText,
+  Notification, Modal, ModalContent, ModalHeader, ModalBody, ModalFooter,
+  CloseButton, FileList, FileListItem, CommitMessageInput, CancelButton,
   UploadButton
-} from './styles/StyledComponents'; // Assuming this path is correct and file is .js/.jsx
+} from './styles/StyledComponents';
 
-// GitHub OAuth App credentials read from environment variables (if needed for OAuth flow)
-// const GITHUB_CLIENT_ID = process.env.REACT_APP_GITHUB_CLIENT_ID;
-// const GITHUB_CLIENT_SECRET = process.env.REACT_APP_GITHUB_CLIENT_SECRET;
+// Import new components for repository consolidation
+import ConsolidateButton from './components/ConsolidateButton';
+import ConsolidateModal from './components/ConsolidateModal';
+
+// Import consolidation utilities
+import { 
+  processSelectedItems,
+  createConsolidatedCommit,
+  checkPathConflicts,
+  retryOperation
+} from './utils/ConsolidationUtils';
 
 const App = () => {
-  // State variables
+  // --- State Management ---
+  
+  // Authentication and user state
   const [authenticated, setAuthenticated] = useState(false);
-  const [octokit, setOctokit] = useState(null);
   const [user, setUser] = useState(null);
+  const [octokit, setOctokit] = useState(null);
+  
+  // Repository state
   const [repositories, setRepositories] = useState([]);
   const [selectedRepo, setSelectedRepo] = useState(null);
-  const [currentPath, setCurrentPath] = useState('/');
   const [contents, setContents] = useState([]);
+  const [currentPath, setCurrentPath] = useState('/');
   const [branches, setBranches] = useState([]);
   const [currentBranch, setCurrentBranch] = useState('main');
-  const [commitMessage, setCommitMessage] = useState("");
-  const [notification, setNotification] = useState(null);
+  
+  // Upload state
   const [uploadFiles, setUploadFiles] = useState([]);
   const [showUploadModal, setShowUploadModal] = useState(false);
-  const [newFolderName, setNewFolderName] = useState(""); // Target folder for uploads
+  const [newFolderName, setNewFolderName] = useState('');
+  const [commitMessage, setCommitMessage] = useState('');
+  const [uploadStep, setUploadStep] = useState('initial');
+  const [detectedConflicts, setDetectedConflicts] = useState([]);
+  
+  // Notification state
+  const [notification, setNotification] = useState(null);
+  
+  // New state for repository consolidation
+  const [showConsolidateModal, setShowConsolidateModal] = useState(false);
+  const [consolidationProgress, setConsolidationProgress] = useState(0);
+  const [consolidationStatus, setConsolidationStatus] = useState('');
+  const [isConsolidating, setIsConsolidating] = useState(false);
 
-  // New states for upload conflict handling
-  const [uploadStep, setUploadStep] = useState("initial"); // 'initial', 'confirmConflict', 'uploading'
-  const [detectedConflicts, setDetectedConflicts] = useState([]); // Array of { zipPath: string, repoPath: string }
-  const [conflictResolution, setConflictResolution] = useState(null); // 'replace', 'skip'
-
-  // Helper function to reset upload modal state
-  const resetUploadState = () => {
-    setUploadFiles([]);
-    setCommitMessage("");
-    setNewFolderName("");
-    setUploadStep("initial");
-    setDetectedConflicts([]);
-    setConflictResolution(null);
-    setShowUploadModal(false);
-  };
-
-  // Initialize GitHub on component mount
+  // --- Initialization ---
+  
+  // Initialize GitHub client on component mount
   useEffect(() => {
     const token = localStorage.getItem('github_token');
     if (token) {
       initializeGitHub(token);
     }
   }, []);
-
-  // Initialize GitHub with token
+  
+  // Initialize GitHub client with token
   const initializeGitHub = async (token) => {
     try {
-      const octokitInstance = new Octokit({ auth: token });
-      setOctokit(octokitInstance);
-      const { data: userData } = await octokitInstance.users.getAuthenticated();
+      const octokitClient = new Octokit({ auth: token });
+      
+      // Verify token by getting user info
+      const { data: userData } = await octokitClient.users.getAuthenticated();
+      
+      setOctokit(octokitClient);
       setUser(userData);
       setAuthenticated(true);
-      await loadUserRepositories(octokitInstance);
-      showNotification('success', `Logged in as ${userData.login}`);
+      
+      // Load repositories
+      loadRepositories(octokitClient);
     } catch (error) {
       console.error('Authentication error:', error);
       localStorage.removeItem('github_token');
       setAuthenticated(false);
       setUser(null);
       setOctokit(null);
-      showNotification('error', 'Authentication failed. Please check your token.');
+      showNotification('error', 'Authentication failed. Please check your token and try again.');
     }
   };
-
+  
+  // --- Repository Management ---
+  
   // Load user repositories
-  const loadUserRepositories = async (octokitInstance) => {
+  const loadRepositories = async (client) => {
     try {
-      const { data: repos } = await octokitInstance.repos.listForAuthenticatedUser({
-        sort: "updated",
+      const { data: repos } = await client.repos.listForAuthenticatedUser({
+        sort: 'updated',
         per_page: 100
       });
-      const sortedRepos = [...repos].sort((a, b) =>
-        a.name.toLowerCase().localeCompare(b.name.toLowerCase())
-      );
-      setRepositories(sortedRepos);
+      setRepositories(repos);
     } catch (error) {
-      console.error("Error loading repositories:", error);
-      showNotification("error", "Failed to load repositories");
+      console.error('Error loading repositories:', error);
+      showNotification('error', 'Failed to load repositories');
     }
   };
-
-  // Load repository contents
-  const loadRepositoryContents = async (repo, path = '', branch = 'main') => {
-    if (!octokit || !repo) return false;
-    try {
-      setContents([]); // Clear previous contents
-      const encodedPath = path ? path.replace(/^\//, '') : '';
-      const { data: contentsData } = await octokit.repos.getContent({
-        owner: repo.owner.login,
-        repo: repo.name,
-        path: encodedPath,
-        ref: branch,
-        headers: { 'If-None-Match': '' } // Prevent caching
-      });
-      setContents(Array.isArray(contentsData) ? contentsData : [contentsData]);
-      setCurrentPath(path || '/');
-
-      // Load branches
-      const { data: branchesData } = await octokit.repos.listBranches({
-        owner: repo.owner.login,
-        repo: repo.name
-      });
-      setBranches(branchesData.map(b => b.name));
-      setCurrentBranch(branch);
-      return true;
-    } catch (error) {
-      console.error('Error loading repository contents:', error);
-      // Handle 404 for empty repo/path gracefully
-      if (error.status === 404) {
-          setContents([]); // Set contents to empty array if path not found
-          setCurrentPath(path || '/');
-          showNotification('info', `Path '${path || '/'}' not found or is empty.`);
-          // Still load branches if possible
-          try {
-              const { data: branchesData } = await octokit.repos.listBranches({ owner: repo.owner.login, repo: repo.name });
-              setBranches(branchesData.map(b => b.name));
-              setCurrentBranch(branch);
-          } catch (branchError) {
-              console.error('Error loading branches after 404:', branchError);
-              showNotification('error', 'Failed to load branches.');
-          }
-          return true; // Indicate handled state
-      } else {
-          showNotification('error', 'Failed to load repository contents.');
-          return false;
-      }
-    }
-  };
-
+  
   // Handle repository selection
   const handleSelectRepository = async (repo) => {
     setSelectedRepo(repo);
-    setCurrentPath('/'); // Reset path on repo change
-    await loadRepositoryContents(repo, '', 'main'); // Load root of main branch
-  };
-
-  // Handle branch selection
-  const handleSelectBranch = async (event) => {
-    const branch = event.target.value;
-    if (selectedRepo) {
-      await loadRepositoryContents(selectedRepo, currentPath, branch);
+    setCurrentPath('/');
+    
+    try {
+      // Load branches
+      const { data: branchesData } = await octokit.repos.listBranches({
+        owner: repo.owner.login,
+        repo: repo.name,
+        per_page: 100
+      });
+      
+      const branchNames = branchesData.map(branch => branch.name);
+      setBranches(branchNames);
+      
+      // Set default branch
+      const defaultBranch = repo.default_branch || 'main';
+      setCurrentBranch(branchNames.includes(defaultBranch) ? defaultBranch : branchNames[0]);
+      
+      // Load contents
+      loadRepositoryContents(repo, '/', defaultBranch);
+    } catch (error) {
+      console.error('Error loading repository details:', error);
+      showNotification('error', 'Failed to load repository details');
     }
   };
-
-  // Handle directory/file navigation
+  
+  // Handle branch selection
+  const handleSelectBranch = (e) => {
+    const branch = e.target.value;
+    setCurrentBranch(branch);
+    loadRepositoryContents(selectedRepo, currentPath, branch);
+  };
+  
+  // Load repository contents
+  const loadRepositoryContents = async (repo, path, branch) => {
+    if (!repo) return;
+    
+    try {
+      const { data: contentsData } = await octokit.repos.getContent({
+        owner: repo.owner.login,
+        repo: repo.name,
+        path: path === '/' ? '' : path.replace(/^\//, ''),
+        ref: branch
+      });
+      
+      setContents(Array.isArray(contentsData) ? contentsData : [contentsData]);
+      setCurrentPath(path);
+    } catch (error) {
+      console.error('Error loading repository contents:', error);
+      setContents([]);
+      showNotification('error', 'Failed to load repository contents');
+    }
+  };
+  
+  // Handle path navigation
+  const handlePathNavigation = (index) => {
+    const pathSegments = currentPath.split('/').filter(Boolean);
+    const newPath = index < 0 ? '/' : '/' + pathSegments.slice(0, index + 1).join('/');
+    loadRepositoryContents(selectedRepo, newPath, currentBranch);
+  };
+  
+  // Handle file/directory navigation
   const handleNavigate = async (item) => {
-    if (!selectedRepo) return;
     if (item.type === 'dir') {
-      await loadRepositoryContents(selectedRepo, item.path, currentBranch);
-    } else if (item.type === 'file') {
-      // View file content (basic implementation)
+      loadRepositoryContents(selectedRepo, item.path, currentBranch);
+    } else {
       try {
+        // Get file content
         const { data: fileData } = await octokit.repos.getContent({
           owner: selectedRepo.owner.login,
           repo: selectedRepo.name,
           path: item.path,
           ref: currentBranch
         });
-
-        if (fileData.encoding === 'base64') {
-          if (isImageFile(fileData.name)) {
-            const imageUrl = `data:image/${fileData.name.split('.').pop()};base64,${fileData.content}`;
-            // In a real app, open this in a modal or new tab
-            console.log('Image URL:', imageUrl);
-            showNotification('info', `Viewing image: ${item.name}`);
-            window.open(imageUrl, '_blank'); // Simple preview
-          } else {
-            try {
-                const content = atob(fileData.content);
-                // Display in a modal or dedicated viewer
-                console.log('File content:', content);
-                showNotification('info', `Viewing file: ${item.name}. Content logged to console.`);
-                alert(`File: ${item.name}\n\nContent:\n${content.substring(0, 500)}${content.length > 500 ? '...' : ''}`); // Simple preview
-            } catch (e) {
-                console.error('Error decoding base64 content:', e);
-                showNotification('error', `Could not decode content for ${item.name}. It might be binary.`);
-            }
-          }
+        
+        // Handle different file types
+        if (item.name.match(/\.(jpg|jpeg|png|gif|svg|webp)$/i)) {
+          // Image file - open in new tab
+          const imageUrl = fileData.download_url;
+          window.open(imageUrl, '_blank');
         } else {
-          // Handle non-base64 encoded content if necessary (e.g., submodule)
-          console.log('File data (non-base64):', fileData);
-          showNotification('info', `Viewing file info for: ${item.name}. Details logged to console.`);
+          // Text file - show content
+          let content = '';
+          
+          if (fileData.encoding === 'base64') {
+            content = atob(fileData.content);
+          } else {
+            content = fileData.content;
+          }
+          
+          // Simple preview alert - in a real app, you'd use a modal
+          alert(`File: ${item.name}\n\n${content.substring(0, 1000)}${content.length > 1000 ? '...' : ''}`);
         }
       } catch (error) {
-        console.error('Error loading file content:', error);
-        showNotification('error', 'Failed to load file content.');
+        console.error('Error loading file:', error);
+        showNotification('error', 'Failed to load file');
       }
     }
   };
-
-  // Navigate up the path
-  const handlePathNavigation = (index) => {
-      const pathSegments = currentPath.split('/').filter(Boolean);
-      const newPath = '/' + pathSegments.slice(0, index + 1).join('/');
-      if (selectedRepo) {
-          loadRepositoryContents(selectedRepo, newPath, currentBranch);
-      }
-  };
-
-  // Check if file is an image
-  const isImageFile = (filename) => {
-    const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp', '.ico'];
-    return imageExtensions.some(ext => filename.toLowerCase().endsWith(ext));
-  };
-
-  // Handle file drop
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!authenticated || !selectedRepo) {
-      showNotification('error', 'Please select a repository first');
-      return;
-    }
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
-      setUploadFiles(files);
-      setShowUploadModal(true);
-      // Reset modal state explicitly when opening
-      setUploadStep("initial");
-      setDetectedConflicts([]);
-      setConflictResolution(null);
-      setNewFolderName(""); // Clear previous folder name
-      setCommitMessage(""); // Clear previous commit message
-    }
-  };
-
-  // Handle drag over
+  
+  // --- File Upload Handling ---
+  
+  // Handle drag over event
   const handleDragOver = (e) => {
     e.preventDefault();
     e.stopPropagation();
   };
-
-  // --- Refactored Upload Logic --- 
-
-  // Step 1: Initiate Upload & Conflict Check
+  
+  // Handle drop event
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (!authenticated || !selectedRepo) {
+      showNotification('error', 'Please select a repository first');
+      return;
+    }
+    
+    const files = Array.from(e.dataTransfer.files);
+    
+    if (files.length === 0) {
+      showNotification('error', 'No files detected');
+      return;
+    }
+    
+    // Check for ZIP files
+    const zipFiles = files.filter(file => file.name.toLowerCase().endsWith('.zip'));
+    
+    if (zipFiles.length > 0) {
+      // Handle ZIP file
+      setUploadFiles(zipFiles);
+      setNewFolderName('');
+      setCommitMessage(`Add files from ${zipFiles[0].name}`);
+      setShowUploadModal(true);
+      setUploadStep('initial');
+    } else {
+      // Handle regular files
+      setUploadFiles(files);
+      setNewFolderName('');
+      setCommitMessage(`Add ${files.length} file(s)`);
+      setShowUploadModal(true);
+      setUploadStep('initial');
+    }
+  };
+  
+  // Reset upload state
+  const resetUploadState = () => {
+    setUploadFiles([]);
+    setShowUploadModal(false);
+    setNewFolderName('');
+    setCommitMessage('');
+    setUploadStep('initial');
+    setDetectedConflicts([]);
+  };
+  
+  // Handle upload initiation
   const handleUploadInitiation = async () => {
-    if (!newFolderName.trim()) {
-      showNotification("error", "Please enter a folder name for the upload.");
+    if (!newFolderName.trim() || !commitMessage.trim()) {
+      showNotification('error', 'Please provide both folder name and commit message');
       return;
     }
-    if (!commitMessage.trim()) {
-      showNotification("error", "Please enter a commit message.");
-      return;
-    }
-
-    const containsZip = uploadFiles.some(file => file.name.toLowerCase().endsWith('.zip'));
-    let rootFileNames = new Set();
-    let conflicts = [];
-
-    setUploadStep("uploading"); // Show processing state immediately
-    showNotification("info", "Checking for potential file conflicts...");
-
+    
+    setUploadStep('uploading');
+    
     try {
-      // Fetch root contents ONLY if a ZIP is present
-      if (containsZip && selectedRepo && octokit) {
-        try {
-          const { data: rootContents } = await octokit.repos.getContent({
-            owner: selectedRepo.owner.login,
-            repo: selectedRepo.name,
-            path: '', // Root path
-            ref: currentBranch,
-            headers: { 'If-None-Match': '' } // Prevent caching
-          });
-          if (Array.isArray(rootContents)) {
-            rootContents.forEach(item => {
-              if (item.type === 'file') {
-                rootFileNames.add(item.name.toLowerCase()); // Use lowercase for comparison
-              }
+      // Check if any of the files is a ZIP
+      const zipFile = uploadFiles.find(file => file.name.toLowerCase().endsWith('.zip'));
+      
+      if (zipFile) {
+        // Process ZIP file
+        const zip = new JSZip();
+        const zipContent = await zip.loadAsync(zipFile);
+        
+        // Get repository root contents to check for conflicts
+        const { data: rootContents } = await octokit.repos.getContent({
+          owner: selectedRepo.owner.login,
+          repo: selectedRepo.name,
+          ref: currentBranch
+        });
+        
+        // Extract file names from root
+        const rootFiles = Array.isArray(rootContents) 
+          ? rootContents.map(item => item.name) 
+          : [rootContents.name];
+        
+        // Check for conflicts between ZIP contents and repository root
+        const conflicts = [];
+        
+        // Process ZIP entries
+        const zipEntries = Object.keys(zipContent.files)
+          .filter(path => !zipContent.files[path].dir)
+          .map(path => ({
+            path,
+            name: path.split('/').pop()
+          }));
+        
+        // Check for conflicts
+        zipEntries.forEach(entry => {
+          if (rootFiles.includes(entry.name)) {
+            conflicts.push({
+              zipPath: entry.path,
+              repoPath: entry.name
             });
           }
-        } catch (error) {
-          if (error.status === 404) {
-            console.log("Repository root is empty or not found (404), proceeding without conflict check.");
-          } else {
-            console.error("Error fetching root contents:", error);
-            showNotification("error", "Failed to check for root file conflicts. Proceeding without check.");
-          }
+        });
+        
+        if (conflicts.length > 0) {
+          // Conflicts detected, ask user for resolution
+          setDetectedConflicts(conflicts);
+          setUploadStep('confirmConflict');
+        } else {
+          // No conflicts, proceed with upload
+          await proceedWithUpload(zipFile, []);
         }
-      }
-
-      // Analyze ZIPs for conflicts (only if ZIP present and root files exist)
-      if (containsZip && rootFileNames.size > 0) {
-        const zip = new JSZip();
-        for (const file of uploadFiles) {
-          if (file.name.toLowerCase().endsWith(".zip")) {
-            try {
-              const zipData = await zip.loadAsync(file);
-              const zipEntries = Object.values(zipData.files);
-              for (const entry of zipEntries) {
-                if (!entry.dir) {
-                  const baseName = entry.name.split('/').pop();
-                  const baseNameLower = baseName.toLowerCase();
-                  if (rootFileNames.has(baseNameLower)) {
-                    if (!conflicts.some(c => c.repoPath.toLowerCase() === baseNameLower)) {
-                      conflicts.push({ zipPath: entry.name, repoPath: baseName }); // Store original case repoPath
-                    }
-                  }
-                }
-              }
-            } catch (zipError) {
-              console.error(`Error reading zip file ${file.name}:`, zipError);
-              showNotification("error", `Could not read ${file.name}. Skipping conflict check for this file.`);
-            }
-          }
-        }
-        setDetectedConflicts(conflicts);
-      }
-
-      // Decide next step
-      if (conflicts.length > 0) {
-        setUploadStep("confirmConflict");
-        showNotification("warning", "File conflicts detected. Please confirm resolution.");
       } else {
-        showNotification("info", "No conflicts detected. Proceeding with upload...");
-        await proceedWithUpload(null); // Pass null resolution
+        // Process regular files
+        await proceedWithUpload(null, uploadFiles);
       }
-
     } catch (error) {
-      console.error("Error during upload initiation/conflict check:", error);
-      showNotification("error", `Conflict check failed: ${error.message}`);
-      setUploadStep("initial"); // Revert step on error
+      console.error('Error processing upload:', error);
+      showNotification('error', `Upload failed: ${error.message}`);
+      setUploadStep('initial');
     }
   };
-
-  // Step 2: Handle User's Conflict Resolution Choice
-  const handleConflictResolution = async (resolutionChoice) => {
-    setConflictResolution(resolutionChoice); // Store the choice
-    setUploadStep("uploading");
-    showNotification("info", `Proceeding with resolution: ${resolutionChoice}. Uploading...`);
-    await proceedWithUpload(resolutionChoice);
-  };
-
-  // Step 3: Process Files and Commit
-  const proceedWithUpload = async (currentConflictResolution) => {
-    if (!octokit || !selectedRepo) {
-        showNotification("error", "Lost connection or repository context. Please retry.");
-        resetUploadState();
-        return;
-    }
-
-    showNotification("info", "Preparing upload... This may take a moment.");
-    setUploadStep("uploading"); // Ensure step is uploading
-
+  
+  // Handle conflict resolution
+  const handleConflictResolution = async (action) => {
+    setUploadStep('uploading');
+    
     try {
-      // Get latest commit and base tree SHA
+      const zipFile = uploadFiles.find(file => file.name.toLowerCase().endsWith('.zip'));
+      
+      if (action === 'replace') {
+        // User chose to replace conflicting files
+        await proceedWithUpload(zipFile, [], true);
+      } else {
+        // User chose to skip conflicting files
+        await proceedWithUpload(zipFile, [], false);
+      }
+    } catch (error) {
+      console.error('Error during conflict resolution:', error);
+      showNotification('error', `Upload failed: ${error.message}`);
+      setUploadStep('initial');
+    }
+  };
+  
+  // Process upload after decisions are made
+  const proceedWithUpload = async (zipFile, regularFiles, replaceConflicts = false) => {
+    try {
+      // Get latest commit SHA
       const { data: refData } = await octokit.git.getRef({
         owner: selectedRepo.owner.login,
         repo: selectedRepo.name,
         ref: `heads/${currentBranch}`
       });
       const latestCommitSha = refData.object.sha;
-
+      
+      // Get the tree SHA from the commit
       const { data: commitData } = await octokit.git.getCommit({
         owner: selectedRepo.owner.login,
         repo: selectedRepo.name,
         commit_sha: latestCommitSha
       });
       const baseTreeSha = commitData.tree.sha;
-
-      // Process files and create blobs
-      const fileBlobs = [];
-      const zip = new JSZip();
-
-      showNotification("info", "Processing files and creating blobs...");
-
-      for (const file of uploadFiles) {
-        if (file.name.toLowerCase().endsWith(".zip")) {
-          // --- ZIP File Processing ---
-          try {
-            const zipData = await zip.loadAsync(file);
-            const zipEntries = Object.values(zipData.files);
-            for (const entry of zipEntries) {
-              if (!entry.dir) {
-                const entryBaseName = entry.name.split('/').pop();
-                const conflictData = detectedConflicts.find(c => c.repoPath.toLowerCase() === entryBaseName.toLowerCase());
-                let targetPath = "";
-                let shouldSkip = false;
-
-                if (conflictData) {
-                  if (currentConflictResolution === 'replace') {
-                    targetPath = conflictData.repoPath; // Replace root file
-                    console.log(`Conflict: Replacing root file ${targetPath} with ${entry.name}`);
-                  } else { // 'skip'
-                    shouldSkip = true;
-                    console.log(`Conflict: Skipping file ${entry.name} conflicting with root file ${conflictData.repoPath}`);
-                  }
-                } else {
-                  // Not a conflict, place in the specified folder relative to currentPath
-                  const basePath = currentPath === '/' ? newFolderName : `${currentPath.replace(/^\/|\/$/g, '')}/${newFolderName}`;
-                  targetPath = `${basePath}/${entry.name}`;
-                  console.log(`No conflict: Adding ${entry.name} to ${targetPath}`);
-                }
-
-                if (!shouldSkip) {
-                  targetPath = targetPath.replace(/^\/+/g, ''); // Clean leading slashes
-                  if (!targetPath) continue; // Avoid empty paths
-                  const entryContent = await entry.async("base64");
-                  const { data: blobData } = await octokit.git.createBlob({
-                    owner: selectedRepo.owner.login,
-                    repo: selectedRepo.name,
-                    content: entryContent,
-                    encoding: "base64"
-                  });
-                  fileBlobs.push({ path: targetPath, mode: "100644", type: "blob", sha: blobData.sha });
-                }
-              }
+      
+      // Prepare tree entries
+      const treeEntries = [];
+      
+      if (zipFile) {
+        // Process ZIP file
+        const zip = new JSZip();
+        const zipContent = await zip.loadAsync(zipFile);
+        
+        // Get conflicting file names if any
+        const conflictingNames = detectedConflicts.map(conflict => conflict.repoPath);
+        
+        // Process each file in the ZIP
+        for (const [path, file] of Object.entries(zipContent.files)) {
+          if (!file.dir) {
+            const fileName = path.split('/').pop();
+            const isConflicting = conflictingNames.includes(fileName);
+            
+            // Skip conflicting files if not replacing
+            if (isConflicting && !replaceConflicts) continue;
+            
+            // Determine target path
+            let targetPath;
+            if (isConflicting && replaceConflicts) {
+              // Place conflicting file at root
+              targetPath = fileName;
+            } else {
+              // Place non-conflicting file in the specified folder
+              targetPath = `${newFolderName}/${path}`;
             }
-          } catch (zipError) {
-            console.error(`Error processing zip file ${file.name}:`, zipError);
-            showNotification("error", `Failed to process ${file.name}. Skipping this file.`);
-            continue;
+            
+            // Get file content
+            const content = await file.async('base64');
+            
+            // Create blob
+            const { data: blobData } = await octokit.git.createBlob({
+              owner: selectedRepo.owner.login,
+              repo: selectedRepo.name,
+              content: content,
+              encoding: 'base64'
+            });
+            
+            // Add to tree entries
+            treeEntries.push({
+              path: targetPath,
+              mode: '100644', // Regular file
+              type: 'blob',
+              sha: blobData.sha
+            });
           }
-        } else {
-          // --- Non-ZIP File Processing ---
-          const basePath = currentPath === '/' ? newFolderName : `${currentPath.replace(/^\/|\/$/g, '')}/${newFolderName}`;
-          const filePath = `${basePath}/${file.name}`;
-          const cleanFilePath = filePath.replace(/^\/+/g, '');
-          if (!cleanFilePath) continue; // Avoid empty paths
-          console.log(`Adding non-ZIP file ${file.name} to ${cleanFilePath}`);
+        }
+      } else {
+        // Process regular files
+        for (const file of regularFiles) {
+          // Read file content
           const content = await readFileAsBase64(file);
+          
+          // Create blob
           const { data: blobData } = await octokit.git.createBlob({
             owner: selectedRepo.owner.login,
             repo: selectedRepo.name,
             content: content,
-            encoding: "base64"
+            encoding: 'base64'
           });
-          fileBlobs.push({ path: cleanFilePath, mode: "100644", type: "blob", sha: blobData.sha });
+          
+          // Add to tree entries
+          treeEntries.push({
+            path: `${newFolderName}/${file.name}`,
+            mode: '100644', // Regular file
+            type: 'blob',
+            sha: blobData.sha
+          });
         }
       }
-
-      // Check if any blobs were actually created
-      if (fileBlobs.length === 0) {
-        showNotification("warning", "No files were processed for upload (possibly all skipped or empty).");
-        resetUploadState();
-        return;
-      }
-
-      showNotification("info", "Creating commit...");
-
-      // Create Tree
+      
+      // Create tree
       const { data: treeData } = await octokit.git.createTree({
         owner: selectedRepo.owner.login,
         repo: selectedRepo.name,
         base_tree: baseTreeSha,
-        tree: fileBlobs
+        tree: treeEntries
       });
-
-      // Create Commit
+      
+      // Create commit
       const { data: newCommitData } = await octokit.git.createCommit({
         owner: selectedRepo.owner.login,
         repo: selectedRepo.name,
@@ -500,26 +464,26 @@ const App = () => {
         tree: treeData.sha,
         parents: [latestCommitSha]
       });
-
+      
       // Update Branch Reference
       await octokit.git.updateRef({
         owner: selectedRepo.owner.login,
         repo: selectedRepo.name,
         ref: `heads/${currentBranch}`,
         sha: newCommitData.sha,
-        force: false // Consider adding conflict handling for the ref update itself
+        force: false
       });
-
-      showNotification("success", `Successfully uploaded files to ${newFolderName ? `folder '${newFolderName}'` : 'current directory'} and resolved conflicts.`);
+      
+      showNotification('success', `Successfully uploaded files to ${newFolderName ? `folder '${newFolderName}'` : 'current directory'} and resolved conflicts.`);
       resetUploadState();
-
+      
       // Refresh contents after a short delay
       setTimeout(() => {
         if (selectedRepo) {
             loadRepositoryContents(selectedRepo, currentPath, currentBranch);
         }
       }, 1000);
-
+      
     } catch (error) {
       console.error("Error during file processing or commit:", error);
       if (error.status === 409) {
@@ -529,12 +493,10 @@ const App = () => {
       } else {
         showNotification("error", `Upload failed: ${error.message || 'Unknown error'}`);
       }
-      setUploadStep("initial"); // Revert to initial step on commit failure
-      // Keep modal open for user to retry or cancel
-      // Consider *not* calling resetUploadState() here so user doesn't lose inputs
+      setUploadStep("initial");
     }
   };
-
+  
   // Read file as base64 (utility function)
   const readFileAsBase64 = (file) => {
     return new Promise((resolve, reject) => {
@@ -549,16 +511,104 @@ const App = () => {
       };
       reader.onerror = (error) => reject(new Error('FileReader error: ' + error.message));
       reader.readAsDataURL(file);
-      // Add a timeout? Maybe not necessary if browser handles it.
     });
   };
+  
+  // --- Repository Consolidation Handlers ---
+  
+  // Handle opening the consolidate modal
+  const handleOpenConsolidateModal = () => {
+    setShowConsolidateModal(true);
+  };
 
+  // Handle closing the consolidate modal
+  const handleCloseConsolidateModal = () => {
+    setShowConsolidateModal(false);
+  };
+
+  // Handle repository consolidation
+  const handleConsolidate = async (consolidationData, options = {}) => {
+    const { targetRepo, sourceRepos, selectedItems, targetPaths, commitMessage } = consolidationData;
+    const { onProgress = () => {} } = options;
+    
+    setIsConsolidating(true);
+    
+    try {
+      // Process selected items
+      onProgress(10, 'Processing selected items...');
+      const processedItems = await processSelectedItems(
+        octokit,
+        sourceRepos,
+        selectedItems,
+        targetPaths,
+        (progress, message) => {
+          onProgress(10 + (progress * 0.4), message);
+        }
+      );
+      
+      // Check for conflicts
+      onProgress(50, 'Checking for conflicts...');
+      const conflicts = await checkPathConflicts(
+        octokit,
+        targetRepo,
+        processedItems,
+        currentBranch
+      );
+      
+      // If conflicts exist, ask for confirmation
+      if (conflicts.length > 0) {
+        const confirmMessage = `${conflicts.length} file(s) already exist in the target repository. Do you want to overwrite them?`;
+        if (!window.confirm(confirmMessage)) {
+          throw new Error('Consolidation cancelled due to conflicts');
+        }
+      }
+      
+      // Create consolidated commit
+      onProgress(60, 'Creating commit...');
+      const result = await createConsolidatedCommit(
+        octokit,
+        targetRepo,
+        processedItems,
+        commitMessage,
+        currentBranch,
+        (progress, message) => {
+          onProgress(60 + (progress * 0.4), message);
+        }
+      );
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to create consolidated commit');
+      }
+      
+      // Success
+      onProgress(100, 'Consolidation completed successfully!');
+      showNotification('success', `Successfully consolidated ${processedItems.length} items into ${targetRepo.name}`);
+      
+      // Refresh contents after a short delay
+      setTimeout(() => {
+        if (selectedRepo && selectedRepo.id === targetRepo.id) {
+          loadRepositoryContents(selectedRepo, currentPath, currentBranch);
+        }
+      }, 1000);
+      
+      return result;
+    } catch (error) {
+      console.error('Consolidation error:', error);
+      showNotification('error', `Consolidation failed: ${error.message}`);
+      throw error;
+    } finally {
+      setIsConsolidating(false);
+    }
+  };
+  
+  // --- Notification and Authentication ---
+  
   // Show notification
   const showNotification = (type, message) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 5000);
   };
-
+  
   // Handle login
   const handleLogin = () => {
     const token = prompt('Enter your GitHub Personal Access Token (with repo scope):');
@@ -567,7 +617,7 @@ const App = () => {
       initializeGitHub(token);
     }
   };
-
+  
   // Handle logout
   const handleLogout = () => {
     localStorage.removeItem('github_token');
@@ -579,11 +629,11 @@ const App = () => {
     setContents([]);
     setCurrentPath('/');
     setBranches([]);
-    resetUploadState(); // Also clear upload state on logout
+    resetUploadState();
   };
-
+  
   // --- Render Logic --- 
-
+  
   return (
     <AppContainer>
       <Header>
@@ -592,6 +642,7 @@ const App = () => {
           <UserInfo>
             <UserAvatar src={user.avatar_url} alt={`${user.login} avatar`} />
             <UserName>{user.login}</UserName>
+            <ConsolidateButton onClick={handleOpenConsolidateModal} />
             <LogoutButton onClick={handleLogout}>Logout</LogoutButton>
           </UserInfo>
         ) : (
@@ -701,7 +752,7 @@ const App = () => {
                       <FileListItem key={index}>{file.name} ({ (file.size / 1024).toFixed(2) } KB)</FileListItem>
                     ))}
                   </FileList>
-                  <div style={{ marginBottom: '15px' }}> {/* Added margin */} 
+                  <div style={{ marginBottom: '15px' }}> 
                     <label htmlFor="newFolderName" style={{ display: 'block', marginBottom: '5px', fontWeight: '500' }}>Target Folder Name:</label>
                     <input
                       type="text"
@@ -712,7 +763,7 @@ const App = () => {
                       style={{ width: '100%', padding: '10px', borderRadius: '6px', border: '1px solid #30363d', backgroundColor: '#0d1117', color: '#f0f6fc' }}
                     />
                   </div>
-                  <CommitMessageInput> {/* Assuming this provides label styling */} 
+                  <CommitMessageInput> 
                     <label htmlFor="commitMessage" style={{ display: 'block', marginBottom: '5px', fontWeight: '500' }}>Commit Message:</label>
                     <textarea
                       id="commitMessage"
@@ -740,7 +791,7 @@ const App = () => {
                 </ModalHeader>
                 <ModalBody>
                   <p>The uploaded ZIP contains files that already exist in the repository's root directory:</p>
-                  <FileList style={{ maxHeight: '150px', overflowY: 'auto', border: '1px solid #30363d', borderRadius: '6px', padding: '5px' }}> {/* Added styling for list */} 
+                  <FileList style={{ maxHeight: '150px', overflowY: 'auto', border: '1px solid #30363d', borderRadius: '6px', padding: '5px' }}> 
                     {detectedConflicts.map((conflict, index) => (
                       <FileListItem key={index} style={{ borderBottom: 'none', marginBottom: '2px' }}>
                         <strong>{conflict.repoPath}</strong> (from ZIP: {conflict.zipPath})
@@ -763,18 +814,23 @@ const App = () => {
                 <ModalHeader><h3>Uploading...</h3></ModalHeader>
                 <ModalBody>
                   <p>Processing your upload, please wait...</p>
-                  {/* Consider adding a visual spinner here */} 
                 </ModalBody>
-                {/* Footer might be hidden or show disabled state */}
               </>
             )}
           </ModalContent>
         </Modal>
       )}
 
+      {/* Consolidate Modal */}
+      <ConsolidateModal
+        isOpen={showConsolidateModal}
+        onClose={handleCloseConsolidateModal}
+        repositories={repositories}
+        octokit={octokit}
+        onConsolidate={handleConsolidate}
+      />
     </AppContainer>
   );
 };
 
 export default App;
-
